@@ -22,10 +22,12 @@ from reid.utils.data.preprocessor import Preprocessor
 from reid.utils.data.sampler import RandomIdentitySampler
 from reid.utils.logging import Logger
 from reid.utils.serialization import load_checkpoint, save_checkpoint
-
-
 from reid.evaluation_metrics import accuracy
 from reid.utils.meters import AverageMeter
+
+from reid.datasets import init_dataset
+from reid.datasets.dataset_loader import ImageDataset
+from IPython import embed
 class Trainer(object):
     def __init__(self, model, criterions, print_freq=1):
         super(Trainer, self).__init__()
@@ -43,9 +45,11 @@ class Trainer(object):
 
         end = time.time()
         for i, inputs in enumerate(data_loader):
+            print(i)
             data_time.update(time.time() - end)
 
             inputs, targets = self._parse_data(inputs)
+            # embed()
             loss, prec1 = self._forward(inputs, targets, epoch)
             losses.update(loss.data[0], targets.size(0))
             precisions.update(prec1, targets.size(0))
@@ -79,6 +83,7 @@ class Trainer(object):
         outputs = self.model(*inputs)
         #new added by wc
         # x1 triplet loss
+
         loss_tri, prec_tri = self.criterions[0](outputs[0], targets, epoch)
         # x2 global feature cross entropy loss
         loss_global = self.criterions[1](outputs[1], targets)
@@ -108,17 +113,19 @@ class ResNet(models.ResNet):
 
 def get_data(name, split_id, data_dir, height, width, batch_size, num_instances,
              workers, combine_trainval):
-    root = osp.join(data_dir, name)
-
-    dataset = datasets.create(name, root, num_val=0.1, split_id=split_id)
+    # root = osp.join(data_dir, name)
+    dataset = init_dataset(name, data_dir)
+    ''
+    # dataset = datasets.create(name, root, num_val=0.1, split_id=split_id)
 
     normalizer = T.Normalize(mean=[0.485, 0.456, 0.406],
                              std=[0.229, 0.224, 0.225])
 
-    train_set = dataset.trainval if combine_trainval else dataset.train
-    num_classes = (dataset.num_trainval_ids if combine_trainval
-                   else dataset.num_train_ids)
-
+    # train_set = dataset.trainval if combine_trainval else dataset.train
+    # train_set = dataset.train
+    # num_classes = (dataset.num_trainval_ids if combine_trainval
+    #                else dataset.num_train_ids)
+    num_classes = dataset.num_train_pids
     train_transformer = T.Compose([
         Resize((height,width)),
         T.RandomSizedRectCrop(height, width),
@@ -134,25 +141,20 @@ def get_data(name, split_id, data_dir, height, width, batch_size, num_instances,
         normalizer,
     ])
 
+    train_set = ImageDataset(dataset.train, train_transformer)
+    val_set = ImageDataset(dataset.val, train_transformer)
+    test_set = ImageDataset(list(set(dataset.query) | set(dataset.gallery)), test_transformer)
 
     train_loader = DataLoader(
-        Preprocessor(train_set, root=dataset.images_dir,
-                     transform=train_transformer),
-        batch_size=batch_size, num_workers=workers,
-        sampler=RandomIdentitySampler(train_set, num_instances),
-        pin_memory=True, drop_last=True)
+        train_set, batch_size=batch_size,
+        sampler=RandomIdentitySampler(train_set, num_instances),shuffle=False,
+        num_workers=workers, pin_memory=True, drop_last=True
+    )
+    val_loader = DataLoader(val_set,
+        batch_size=batch_size, shuffle=False, num_workers=workers,pin_memory=True)
 
-    val_loader = DataLoader(
-        Preprocessor(dataset.val, root=dataset.images_dir,
-                     transform=test_transformer),
-        batch_size=batch_size, num_workers=workers,
-        shuffle=False, pin_memory=True)
-
-    test_loader = DataLoader(
-        Preprocessor(list(set(dataset.query) | set(dataset.gallery)),
-                     root=dataset.images_dir, transform=test_transformer),
-        batch_size=batch_size, num_workers=workers,
-        shuffle=False, pin_memory=True)
+    test_loader = DataLoader(test_set,
+        batch_size=batch_size, shuffle=False, num_workers=workers,pin_memory=True)
 
     return dataset, num_classes, train_loader, val_loader, test_loader
 
@@ -260,7 +262,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Triplet loss classification")
     # data
     parser.add_argument('-d', '--dataset', type=str, default='market1501',
-                        choices=datasets.names())
+                        choices=datasets.get_names())
     parser.add_argument('-b', '--batch_size', type=int, default=128)
     parser.add_argument('-j', '--workers', type=int, default=4)
     parser.add_argument('--split', type=int, default=0)

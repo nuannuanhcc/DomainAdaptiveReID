@@ -1,188 +1,91 @@
-from __future__ import print_function, absolute_import
+# encoding: utf-8
+"""
+@author:  sherlock
+@contact: sherlockliao01@gmail.com
+"""
+
+import glob
+import re
+
 import os.path as osp
-import numpy as np
 
-from ..utils.data import Dataset
-from ..utils.osutils import mkdir_if_missing
-from ..utils.serialization import read_json
-from ..utils.serialization import write_json
+from .bases import BaseImageDataset
 
 
-########################
-# Added
-def _pluck(identities, indices, relabel=False):
-  """Extract im names of given pids.
-  Args:
-    identities: containing im names
-    indices: pids
-    relabel: whether to transform pids to classification labels
-  """
-  ret = []
-  for index, pid in enumerate(indices):
-    pid_images = identities[pid]
-    for camid, cam_images in enumerate(pid_images):
-      for fname in cam_images:
-        name = osp.splitext(fname)[0]
-        x, y, _ = map(int, name.split('_'))
-        assert pid == x and camid == y
-        if relabel:
-          ret.append((fname, index, camid))
-        else:
-          ret.append((fname, pid, camid))
-  return ret
-########################
+class Market1501(BaseImageDataset):
+    """
+    Market1501
+    Reference:
+    Zheng et al. Scalable Person Re-identification: A Benchmark. ICCV 2015.
+    URL: http://www.liangzheng.org/Project/project_reid.html
 
+    Dataset statistics:
+    # identities: 1501 (+1 for background)
+    # images: 12936 (train) + 3368 (query) + 15913 (gallery)
+    """
+    dataset_dir = 'market1501'
 
-class Market1501(Dataset):
-  url = 'https://drive.google.com/file/d/0B8-rUzbwVRk0c054eEozWG9COHM/view'
-  md5 = '65005ab7d12ec1c44de4eeafe813e68a'
+    def __init__(self, root='/home/haoluo/data', verbose=True, **kwargs):
+        super(Market1501, self).__init__()
+        self.dataset_dir = osp.join(root, self.dataset_dir)
+        self.train_dir = osp.join(self.dataset_dir, 'bounding_box_train')
+        self.val_dir = osp.join(self.dataset_dir, 'val')
+        self.query_dir = osp.join(self.dataset_dir, 'query')
+        self.gallery_dir = osp.join(self.dataset_dir, 'bounding_box_test')
 
-  def __init__(self, root, split_id=0, num_val=100, download=True):
-    super(Market1501, self).__init__(root, split_id=split_id)
+        self._check_before_run()
 
-    if download:
-      self.download()
+        train = self._process_dir(self.train_dir, relabel=True)
+        query = self._process_dir(self.query_dir, relabel=False)
+        gallery = self._process_dir(self.gallery_dir, relabel=False)
+        val = self._process_dir(self.val_dir, relabel=True)
 
-    if not self._check_integrity():
-      raise RuntimeError("Dataset not found or corrupted. " +
-                         "You can use download=True to download it.")
+        if verbose:
+            print("=> Market1501 loaded")
+            self.print_dataset_statistics(train, query, gallery)
 
-    self.load(num_val)
+        self.train = train
+        self.query = query
+        self.gallery = gallery
+        self.val = val
 
-  def download(self):
-    if self._check_integrity():
-      print("Files already downloaded and verified")
-      return
+        self.num_train_pids, self.num_train_imgs, self.num_train_cams = self.get_imagedata_info(self.train)
+        self.num_val_pids, self.num_val_imgs, self.num_val_cams = self.get_imagedata_info(self.val)
+        self.num_query_pids, self.num_query_imgs, self.num_query_cams = self.get_imagedata_info(self.query)
+        self.num_gallery_pids, self.num_gallery_imgs, self.num_gallery_cams = self.get_imagedata_info(self.gallery)
 
-    import re
-    import hashlib
-    import shutil
-    from glob import glob
-    from zipfile import ZipFile
+    def _check_before_run(self):
+        """Check if all files are available before going deeper"""
+        if not osp.exists(self.dataset_dir):
+            raise RuntimeError("'{}' is not available".format(self.dataset_dir))
+        if not osp.exists(self.train_dir):
+            raise RuntimeError("'{}' is not available".format(self.train_dir))
+        if not osp.exists(self.val_dir):
+            raise RuntimeError("'{}' is not available".format(self.val_dir))
+        if not osp.exists(self.query_dir):
+            raise RuntimeError("'{}' is not available".format(self.query_dir))
+        if not osp.exists(self.gallery_dir):
+            raise RuntimeError("'{}' is not available".format(self.gallery_dir))
 
-    raw_dir = osp.join(self.root, 'raw')
-    mkdir_if_missing(raw_dir)
+    def _process_dir(self, dir_path, relabel=False):
+        img_paths = glob.glob(osp.join(dir_path, '*.jpg'))
+        pattern = re.compile(r'([-\d]+)_c(\d)')
 
-    # Download the raw zip file
-    fpath = osp.join(raw_dir, 'Market-1501-v15.09.15.zip')
-    if osp.isfile(fpath) and \
-            hashlib.md5(open(fpath, 'rb').read()).hexdigest() == self.md5:
-      print("Using downloaded file: " + fpath)
-    else:
-      raise RuntimeError("Please download the dataset manually from {} "
-                         "to {}".format(self.url, fpath))
+        pid_container = set()
+        for img_path in img_paths:
+            pid, _ = map(int, pattern.search(img_path).groups())
+            if pid == -1: continue  # junk images are just ignored
+            pid_container.add(pid)
+        pid2label = {pid: label for label, pid in enumerate(pid_container)}
 
-    # Extract the file
-    exdir = osp.join(raw_dir, 'Market-1501-v15.09.15')
-    if not osp.isdir(exdir):
-      print("Extracting zip file")
-      with ZipFile(fpath) as z:
-        z.extractall(path=raw_dir)
+        dataset = []
+        for img_path in img_paths:
+            pid, camid = map(int, pattern.search(img_path).groups())
+            if pid == -1: continue  # junk images are just ignored
+            assert 0 <= pid <= 1501  # pid == 0 means background
+            assert 1 <= camid <= 6
+            camid -= 1  # index starts from 0
+            if relabel: pid = pid2label[pid]
+            dataset.append((img_path, pid, camid))
 
-    # Format
-    images_dir = osp.join(self.root, 'images')
-    mkdir_if_missing(images_dir)
-
-    # 1501 identities (+1 for background) with 6 camera views each
-    identities = [[[] for _ in range(6)] for _ in range(1502)]
-    def register(subdir, pattern=re.compile(r'([-\d]+)_c(\d)')):
-      fnames = [] ######### Added. Names of images in new dir.
-      fpaths = sorted(glob(osp.join(exdir, subdir, '*.jpg')))
-      pids = set()
-      for fpath in fpaths:
-        fname = osp.basename(fpath)
-        pid, cam = map(int, pattern.search(fname).groups())
-        if pid == -1: continue  # junk images are just ignored
-        assert 0 <= pid <= 1501  # pid == 0 means background
-        assert 1 <= cam <= 6
-        cam -= 1
-        pids.add(pid)
-        fname = ('{:08d}_{:02d}_{:04d}.jpg'
-                 .format(pid, cam, len(identities[pid][cam])))
-        identities[pid][cam].append(fname)
-        shutil.copy(fpath, osp.join(images_dir, fname))
-        fnames.append(fname) ######### Added
-      return pids, fnames
-
-    trainval_pids, _ = register('bounding_box_train')
-    gallery_pids, gallery_fnames = register('bounding_box_test')
-    query_pids, query_fnames = register('query')
-    assert query_pids <= gallery_pids
-    assert trainval_pids.isdisjoint(gallery_pids)
-
-    # Save meta information into a json file
-    meta = {'name': 'Market1501', 'shot': 'multiple', 'num_cameras': 6,
-            'identities': identities,
-            'query_fnames': query_fnames, ######### Added
-            'gallery_fnames': gallery_fnames} ######### Added
-    write_json(meta, osp.join(self.root, 'meta.json'))
-
-    # Save the only training / test split
-    splits = [{
-      'trainval': sorted(list(trainval_pids)),
-      'query': sorted(list(query_pids)),
-      'gallery': sorted(list(gallery_pids))}]
-    write_json(splits, osp.join(self.root, 'splits.json'))
-
-  ########################  
-  # Added
-  def load(self, num_val=0.3, verbose=True):
-    splits = read_json(osp.join(self.root, 'splits.json'))
-    if self.split_id >= len(splits):
-      raise ValueError("split_id exceeds total splits {}"
-                       .format(len(splits)))
-    self.split = splits[self.split_id]
-
-    # Randomly split train / val
-    trainval_pids = np.asarray(self.split['trainval'])
-    np.random.shuffle(trainval_pids)
-    num = len(trainval_pids)
-    if isinstance(num_val, float):
-      num_val = int(round(num * num_val))
-    if num_val >= num or num_val < 0:
-      raise ValueError("num_val exceeds total identities {}"
-                       .format(num))
-    train_pids = sorted(trainval_pids[:-num_val])
-    val_pids = sorted(trainval_pids[-num_val:])
-
-    self.meta = read_json(osp.join(self.root, 'meta.json'))
-    identities = self.meta['identities']
-
-    self.train = _pluck(identities, train_pids, relabel=True)
-    self.val = _pluck(identities, val_pids, relabel=True)
-    self.trainval = _pluck(identities, trainval_pids, relabel=True)
-    self.num_train_ids = len(train_pids)
-    self.num_val_ids = len(val_pids)
-    self.num_trainval_ids = len(trainval_pids)
-
-    ##########
-    # Added
-    query_fnames = self.meta['query_fnames']
-    gallery_fnames = self.meta['gallery_fnames']
-    self.query = []
-    for fname in query_fnames:
-      name = osp.splitext(fname)[0]
-      pid, cam, _ = map(int, name.split('_'))
-      self.query.append((fname, pid, cam))
-    self.gallery = []
-    for fname in gallery_fnames:
-      name = osp.splitext(fname)[0]
-      pid, cam, _ = map(int, name.split('_'))
-      self.gallery.append((fname, pid, cam))
-    ##########
-
-    if verbose:
-      print(self.__class__.__name__, "dataset loaded")
-      print("  subset   | # ids | # images")
-      print("  ---------------------------")
-      print("  train    | {:5d} | {:8d}"
-            .format(self.num_train_ids, len(self.train)))
-      print("  val      | {:5d} | {:8d}"
-            .format(self.num_val_ids, len(self.val)))
-      print("  trainval | {:5d} | {:8d}"
-            .format(self.num_trainval_ids, len(self.trainval)))
-      print("  query    | {:5d} | {:8d}"
-            .format(len(self.split['query']), len(self.query)))
-      print("  gallery  | {:5d} | {:8d}"
-            .format(len(self.split['gallery']), len(self.gallery)))
-  ########################
+        return dataset
